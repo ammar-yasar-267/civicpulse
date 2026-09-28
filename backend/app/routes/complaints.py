@@ -15,7 +15,7 @@ from app.domain.enums import Category, Priority, Status
 from app.domain.state_machine import InvalidTransition
 from app.logging_setup import get_request_id
 from app.providers.ratelimit import client_identifier
-from app.schemas import ComplaintCreate, ComplaintOut, Page, StatusUpdate
+from app.schemas import ComplaintCreate, ComplaintOut, ErrorBody, Page, StatusUpdate
 from app.services.complaint_service import ComplaintNotFound
 
 router = APIRouter(prefix="/api/complaints", tags=["complaints"])
@@ -65,8 +65,8 @@ def enforce_rate_limit(
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(enforce_rate_limit)],
     responses={
-        400: {"description": "Field-level validation error"},
-        429: {"description": "Rate limit exceeded; see Retry-After"},
+        400: {"model": ErrorBody, "description": "Field-level validation error"},
+        429: {"model": ErrorBody, "description": "Rate limit exceeded; see Retry-After"},
     },
 )
 def submit_complaint(
@@ -116,7 +116,7 @@ def list_complaints(
 @router.get(
     "/{complaint_id}",
     response_model=ComplaintOut,
-    responses={404: {"description": "Not found"}},
+    responses={404: {"model": ErrorBody, "description": "Not found"}},
 )
 def get_complaint(complaint_id: uuid.UUID, service: ComplaintServiceDep) -> ComplaintOut:
     try:
@@ -137,8 +137,8 @@ def get_complaint(complaint_id: uuid.UUID, service: ComplaintServiceDep) -> Comp
     "/{complaint_id}/status",
     response_model=ComplaintOut,
     responses={
-        404: {"description": "Not found"},
-        409: {"description": "Invalid status transition"},
+        404: {"model": ErrorBody, "description": "Not found"},
+        409: {"model": ErrorBody, "description": "Invalid status transition"},
     },
 )
 def update_status(

@@ -34,7 +34,12 @@ def health() -> dict[str, str]:
 @router.get(
     "/ready",
     response_model=ReadyBody,
-    responses={503: {"description": "A dependency is unreachable; the body names it"}},
+    responses={
+        503: {
+            "model": ReadyBody,
+            "description": "A dependency is unreachable; the body names it",
+        }
+    },
 )
 def ready(request: Request, response: Response, cache: CacheDep) -> ReadyBody:
     """Readiness: 200 only if Postgres and Redis are both reachable, else 503 naming the
