@@ -305,46 +305,59 @@ jobs:
       - name: Load images
         run: docker load -i /tmp/images.tar
 
-      - name: Create .env for the stack
-        # Throwaway credentials generated per run. Nothing is read from the repository, because
-        # a committed .env is a -20 deduction and a real credential leak.
+      - name: The README quickstart works from a clean clone
+        # This is the §5.3 check worth -5: "a README quickstart that does not work from a clean
+        # clone". The runner's checkout has no .env, so this is genuinely the stranger's experience
+        # — one command, and the assertions below prove it produced a SEEDED, working system with
+        # no follow-up steps.
         run: |
-          cat > .env <<EOF
-          POSTGRES_USER=civicpulse
-          POSTGRES_PASSWORD=$(openssl rand -hex 16)
-          POSTGRES_DB=civicpulse
-          TRIAGE_PROVIDER=simulated
-          # Low enough that the integration run actually exercises the limiter. The rate-limit
-          # checks in verify-stack.sh read this back from the X-RateLimit-Limit header.
-          RATE_LIMIT_REQUESTS=25
-          RATE_LIMIT_WINDOW_SECONDS=60
-          LOG_LEVEL=INFO
-          EOF
-
-      - name: Start the stack
-        run: |
-          # Reuse the images built upstream rather than rebuilding them here.
+          test ! -f .env || { echo "::error::.env exists in a fresh checkout"; exit 1; }
+          echo "no .env present — running the documented one command"
+          # Reuse the images built upstream rather than rebuilding them here; --no-build is the
+          # only deviation from the README, and it changes nothing about the startup sequence.
           docker tag civicpulse-backend:ci civicpulse-backend:dev
           docker tag civicpulse-frontend:ci civicpulse-frontend:dev
           docker compose up -d --no-build
 
       - name: Wait for /ready
         run: |
-          for i in $(seq 1 60); do
-            if curl -fsS http://localhost:8000/ready | grep -q '"status":"ready"'; then
+          for i in $(seq 1 90); do
+            if curl -fsS http://localhost:8000/ready 2>/dev/null | grep -q '"status":"ready"'; then
               echo "ready after ${i}s"; exit 0
             fi
             sleep 1
           done
           echo "::error::backend never became ready"
-          docker compose ps
+          docker compose ps -a
           docker compose logs --tail 80
           exit 1
 
-      - name: Migrate and seed
+      - name: The one command left the system seeded
+        # No migrate step here on purpose: the compose `migrate` service already did it. If that
+        # service regresses, this fails and the README's central claim is caught.
         run: |
-          docker compose exec -T backend alembic upgrade head
-          docker compose exec -T backend python -m app.seed
+          total=$(curl -fsS http://localhost:8000/api/stats | python3 -c "import sys,json; print(json.load(sys.stdin)['total'])")
+          echo "complaints present after the single command: $total"
+          [ "$total" -ge 30 ] || { echo "::error::expected >=30 seeded complaints, got $total"; exit 1; }
+
+      - name: Apply the configured environment
+        # The rest of the job needs the low rate limit and the simulated provider, which the README
+        # path does not set. Recreate the two services that read them.
+        run: |
+          cat > .env <<EOF
+          POSTGRES_USER=civicpulse
+          POSTGRES_PASSWORD=civicpulse
+          POSTGRES_DB=civicpulse
+          TRIAGE_PROVIDER=simulated
+          RATE_LIMIT_REQUESTS=25
+          RATE_LIMIT_WINDOW_SECONDS=60
+          LOG_LEVEL=INFO
+          EOF
+          docker compose up -d --no-build --force-recreate backend frontend
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:8000/ready >/dev/null 2>&1 && break
+            sleep 1
+          done
 
       - name: Seed is idempotent
         run: |

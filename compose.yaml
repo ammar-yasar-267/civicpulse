@@ -10,6 +10,15 @@
 #
 # This file is the DEV file: it builds from source and bind-mounts the backend for hot reload.
 # compose.prod.yaml is the deploy file and does neither.
+#
+# Every value has a dev default, so a stranger who has just cloned the repository gets a running,
+# seeded system from `docker compose up -d --build` with no .env and no API key (§1.4). Creating
+# .env from .env.example overrides any of them.
+#
+# Note the asymmetry with compose.prod.yaml, which uses `${VAR:?...}` and refuses to start without
+# explicit values. That is deliberate: a local throwaway Postgres on an internal network with no
+# published port is not a credential worth protecting, while a production database very much is —
+# and a production stack silently falling back to the password "civicpulse" would be a disaster.
 
 name: civicpulse
 
@@ -46,6 +55,50 @@ services:
         limits: { cpus: "0.50", memory: 128M }
         reservations: { cpus: "0.05", memory: 32M }
 
+  # ----------------------------------------------------------------- migrate --
+  # One-shot: apply migrations, then seed. Runs to completion and exits, and the backend waits for
+  # it via `service_completed_successfully`. This is what makes `docker compose up` alone produce a
+  # running system with data in it (§1.4), rather than leaving a stranger to run two more commands.
+  #
+  # Deliberately a SEPARATE service rather than something the backend does at startup:
+  #
+  #   * Schema changes stay out of application startup code (§2.3). The app never runs DDL.
+  #   * With two backend replicas, startup migrations would race — two processes applying the same
+  #     migration to the same database. One service, one migration, once.
+  #   * A failed migration fails THIS container, loudly, instead of crash-looping the API.
+  #
+  # On Kubernetes the same job is done by running `alembic upgrade head` explicitly — see
+  # scripts/k8s-up.sh. The equivalent production shape is an initContainer or a Job.
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: civicpulse-backend:dev
+    restart: "no"
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-civicpulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-civicpulse}
+      POSTGRES_DB: ${POSTGRES_DB:-civicpulse}
+      REDIS_HOST: cache
+      REDIS_PORT: "6379"
+      # Seeding runs the real triage path. Rules by default so a clean clone needs no API key.
+      TRIAGE_PROVIDER: ${TRIAGE_PROVIDER:-rules}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - internal
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    # The seed is idempotent, so re-running `up` neither duplicates rows nor fails.
+    command: ["sh", "-c", "alembic upgrade head && python -m app.seed"]
+
   # ----------------------------------------------------------------- backend --
   backend:
     build:
@@ -60,9 +113,9 @@ services:
     environment:
       POSTGRES_HOST: database
       POSTGRES_PORT: "5432"
-      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:-civicpulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-civicpulse}
+      POSTGRES_DB: ${POSTGRES_DB:-civicpulse}
       REDIS_HOST: cache
       REDIS_PORT: "6379"
       TRIAGE_PROVIDER: ${TRIAGE_PROVIDER:-rules}
@@ -96,6 +149,9 @@ services:
         condition: service_healthy
       cache:
         condition: service_healthy
+      # Waits for the schema to exist and the seed to finish before serving a single request.
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       # /health, not /ready: this asks "is the process alive", and a database blip must not
       # make Compose mark the backend unhealthy and restart it.
@@ -120,9 +176,9 @@ services:
     image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:-civicpulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-civicpulse}
+      POSTGRES_DB: ${POSTGRES_DB:-civicpulse}
       # Subdirectory rather than the volume root: initdb refuses to run in a directory that
       # already contains lost+found on some volume drivers.
       PGDATA: /var/lib/postgresql/data/pgdata

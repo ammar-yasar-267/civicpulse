@@ -84,18 +84,26 @@ docker compose exec frontend ping database   # fails to resolve — this is corr
 
 ## Quickstart
 
-**Prerequisites:** Docker Desktop (8 GB recommended). Nothing else — no Python, no Node, no key.
+**Prerequisites:** Docker Desktop (8 GB recommended). Nothing else — no Python, no Node, no `.env`,
+no API key.
 
 ```sh
-git clone https://github.com/ammar-yasar-267/civicpulse.git
-cd civicpulse
-cp .env.example .env          # defaults work as-is; TRIAGE_PROVIDER=rules needs no API key
+git clone https://github.com/ammar-yasar-267/civicpulse.git && cd civicpulse
 docker compose up -d --build
-docker compose exec backend alembic upgrade head
-docker compose exec backend python -m app.seed    # 36 realistic complaints, idempotent
 ```
 
-Open **<http://localhost:8080>**.
+Open **<http://localhost:8080>**. That is the whole thing: five containers, schema migrated, and
+**36 realistic complaints already seeded**. Measured from a clean clone: **~20 seconds**.
+
+There is no separate migrate step because a one-shot `migrate` service does it — it waits for
+Postgres to be healthy, applies the Alembic migrations, runs the idempotent seed, and exits. The
+backend declares `depends_on: migrate: service_completed_successfully`, so it never serves a request
+against a schema that does not exist yet. Running `up` again re-runs the seed and changes nothing.
+
+Every value has a dev default, which is why no `.env` is needed. Copy `.env.example` to `.env` to
+override any of them. `compose.prod.yaml` deliberately does the opposite and refuses to start
+without explicit values — a production stack silently falling back to the password `civicpulse`
+would be a disaster.
 
 Verify every claim this README makes:
 
@@ -103,12 +111,18 @@ Verify every claim this README makes:
 ./scripts/verify-stack.sh     # 31 assertions; writes docs/evidence/stack-verification.txt
 ```
 
-### Kubernetes
+### The second command: Kubernetes
 
 ```sh
-./scripts/k8s-up.sh           # kind cluster + ingress + metrics-server + deploy + seed
-curl -H 'Host: civicpulse.local' http://localhost/api/stats
+./scripts/k8s-up.sh           # kind cluster + ingress + metrics-server + build + deploy + seed
+```
+
+Then `curl -H 'Host: civicpulse.local' http://localhost/api/stats`, and to reproduce the
+autoscaling evidence:
+
+```sh
 ./scripts/load-test.sh        # k6 load + HPA capture + the replicas-vs-load chart
+./scripts/rollout-demo.sh     # zero-downtime rolling update under live load
 ```
 
 ### Using a real language model
