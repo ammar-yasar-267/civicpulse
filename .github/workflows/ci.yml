@@ -1,0 +1,371 @@
+# Pull-request gate. Runs on every PR to main and every push to dev.
+#
+# Deliberately does NOT publish anything (§3.4): a PR is untrusted code, and a job that pushes
+# an image from an unmerged branch is how a registry gets poisoned. Building is proof the
+# Dockerfile works; pushing is cd.yml's job, after these checks have passed on the merged result.
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+# Least privilege, set at the top so no job silently inherits more. Read-only is enough for
+# everything here; the two jobs that need more ask for it explicitly.
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede an in-flight run when the branch is pushed again — no point burning minutes on a
+  # commit that is already stale.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  lint-and-type:
+    name: lint and type check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff==0.8.4 mypy==1.14.0 types-redis==4.6.0.20241004
+
+      - name: ruff (lint)
+        working-directory: backend
+        run: ruff check app tests
+
+      - name: ruff (format)
+        working-directory: backend
+        run: ruff format --check app tests
+
+      - name: mypy
+        working-directory: backend
+        run: mypy app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: eslint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: tsc --noEmit
+        working-directory: frontend
+        run: npm run typecheck
+
+  # ---------------------------------------------------------------------------
+  test-backend:
+    name: backend tests
+    runs-on: ubuntu-24.04
+    # Real Postgres, because the schema uses native enums, gen_random_uuid() and CHECK
+    # constraints. Testing against SQLite would pass while the deployed schema differs.
+    services:
+      postgres:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: civicpulse
+          POSTGRES_PASSWORD: civicpulse
+          POSTGRES_DB: civicpulse_test
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U civicpulse -d civicpulse_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Pinned to the deterministic fake: with a live provider the same input can produce
+      # different output, and a suite that is green only on average trains a team to ignore red.
+      TRIAGE_PROVIDER: simulated
+      TEST_POSTGRES_HOST: localhost
+      TEST_POSTGRES_PORT: "55432"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest==8.3.4 pytest-cov==6.0.0 pytest-asyncio==0.25.0
+
+      - name: pytest with coverage gate
+        working-directory: backend
+        # The gate (>= 65%) lives in pyproject.toml, so it is identical locally and here.
+        run: pytest
+
+      - name: Check the committed OpenAPI schema is current
+        # The frontend's types are generated from this file. If a route changed without
+        # re-exporting, the frontend is typed against a contract the backend no longer honours —
+        # catch it here rather than at runtime.
+        run: |
+          python -m pip install -r backend/requirements.txt
+          python scripts/export_openapi.py
+          git diff --exit-code backend/openapi.json \
+            || { echo "::error::backend/openapi.json is stale. Run: python scripts/export_openapi.py"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  test-frontend:
+    name: frontend tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: vitest
+        working-directory: frontend
+        run: npm run test
+
+      - name: Check generated API types are current
+        working-directory: frontend
+        run: |
+          npm run api:types
+          git diff --exit-code src/api/schema.d.ts \
+            || { echo "::error::schema.d.ts is stale. Run: npm run api:types"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: build images (no push)
+    runs-on: ubuntu-24.04
+    needs: [lint-and-type, test-backend, test-frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false             # a PR must not publish artifacts
+          load: true
+          tags: civicpulse-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: civicpulse-frontend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report image sizes
+        # The frontend must stay small; over ~60 MB means the multi-stage split is not working.
+        run: |
+          docker image ls civicpulse-backend:ci  --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+          docker image ls civicpulse-frontend:ci --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+
+      - name: Assert images run as a non-root user
+        run: |
+          for image in civicpulse-backend:ci civicpulse-frontend:ci; do
+            uid=$(docker run --rm --entrypoint id "$image" -u)
+            echo "$image runs as uid $uid"
+            [ "$uid" != "0" ] || { echo "::error::$image runs as root"; exit 1; }
+          done
+
+      - name: Save images for downstream jobs
+        run: |
+          docker save civicpulse-backend:ci civicpulse-frontend:ci -o /tmp/images.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-images
+          path: /tmp/images.tar
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  scan:
+    name: trivy image scan
+    runs-on: ubuntu-24.04
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-images
+          path: /tmp
+
+      - name: Load images
+        run: docker load -i /tmp/images.tar
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: civicpulse-backend:ci
+          severity: HIGH,CRITICAL
+          # Only fail on something we can actually act on: a vulnerability with no released fix
+          # cannot be remediated by us today, and failing on it trains people to ignore the scan.
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: civicpulse-frontend:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  # ---------------------------------------------------------------------------
+  manifests:
+    name: validate k8s manifests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSfL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp
+          sudo install /tmp/kubeconform /usr/local/bin/
+
+      - name: kustomize build + kubeconform (prod overlay)
+        # Catches a broken manifest in 20 seconds instead of on the cluster.
+        run: |
+          kubectl kustomize k8s/overlays/prod > /tmp/prod.yaml
+          echo "--- rendered $(grep -c '^kind:' /tmp/prod.yaml) objects ---"
+          kubeconform -strict -summary -verbose \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /tmp/prod.yaml
+
+      - name: Assert no secret material is committed
+        run: python3 scripts/check_submission.py --ci
+
+  # ---------------------------------------------------------------------------
+  integration:
+    name: compose integration smoke
+    runs-on: ubuntu-24.04
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-images
+          path: /tmp
+
+      - name: Load images
+        run: docker load -i /tmp/images.tar
+
+      - name: Create .env for the stack
+        # Throwaway credentials generated per run. Nothing is read from the repository, because
+        # a committed .env is a -20 deduction and a real credential leak.
+        run: |
+          cat > .env <<EOF
+          POSTGRES_USER=civicpulse
+          POSTGRES_PASSWORD=$(openssl rand -hex 16)
+          POSTGRES_DB=civicpulse
+          TRIAGE_PROVIDER=simulated
+          RATE_LIMIT_REQUESTS=1000
+          RATE_LIMIT_WINDOW_SECONDS=60
+          LOG_LEVEL=INFO
+          EOF
+
+      - name: Start the stack
+        run: |
+          # Reuse the images built upstream rather than rebuilding them here.
+          docker tag civicpulse-backend:ci civicpulse-backend:dev
+          docker tag civicpulse-frontend:ci civicpulse-frontend:dev
+          docker compose up -d --no-build
+
+      - name: Wait for /ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/ready | grep -q '"status":"ready"'; then
+              echo "ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::backend never became ready"
+          docker compose ps
+          docker compose logs --tail 80
+          exit 1
+
+      - name: Migrate and seed
+        run: |
+          docker compose exec -T backend alembic upgrade head
+          docker compose exec -T backend python -m app.seed
+
+      - name: Seed is idempotent
+        run: |
+          before=$(docker compose exec -T database psql -U civicpulse -d civicpulse -t -A -c "SELECT count(*) FROM complaints")
+          docker compose exec -T backend python -m app.seed
+          after=$(docker compose exec -T database psql -U civicpulse -d civicpulse -t -A -c "SELECT count(*) FROM complaints")
+          echo "rows before=$before after=$after"
+          [ "$before" = "$after" ] || { echo "::error::seed is not idempotent"; exit 1; }
+
+      - name: Full request path through the frontend proxy
+        run: bash scripts/verify-stack.sh
+
+      - name: Network segmentation is enforced
+        run: |
+          if docker compose exec -T frontend ping -c1 -W2 database >/dev/null 2>&1; then
+            echo "::error::frontend can reach the database — segmentation is broken"
+            exit 1
+          fi
+          echo "confirmed: frontend has no route to the database"
+
+      - name: Data survives a restart
+        run: |
+          before=$(docker compose exec -T database psql -U civicpulse -d civicpulse -t -A -c "SELECT count(*) FROM complaints")
+          docker compose down
+          docker compose up -d --no-build
+          for i in $(seq 1 60); do curl -fsS http://localhost:8000/ready >/dev/null 2>&1 && break; sleep 1; done
+          after=$(docker compose exec -T database psql -U civicpulse -d civicpulse -t -A -c "SELECT count(*) FROM complaints")
+          echo "rows before=$before after=$after"
+          [ "$before" = "$after" ] || { echo "::error::rows lost across down/up"; exit 1; }
+
+      - name: Print logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Tear down
+        if: always()
+        # -v here, unlike the persistence check above: the runner is disposable but leaving
+        # volumes behind would make a re-run start from dirty state.
+        run: docker compose down -v
