@@ -1,0 +1,116 @@
+# PostgreSQL as a StatefulSet, not a Deployment (§3.3).
+#
+# Why this is a marked error if you get it wrong: a Deployment's pods are interchangeable and its
+# rolling update may run two pods at once, both mounting the same ReadWriteOnce volume — or, with a
+# Deployment plus a shared PVC, two postgres processes over one data directory, which corrupts it.
+# A StatefulSet gives stable identity (postgres-0), ordered lifecycle, and one PVC per pod via
+# volumeClaimTemplates, so the storage belongs to the instance rather than to the workload.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: civicpulse
+  labels:
+    app: postgres
+spec:
+  # Headless: the StatefulSet needs stable per-pod DNS (postgres-0.postgres.civicpulse.svc).
+  # ClusterIP None, and emphatically never NodePort or LoadBalancer — exposing a database outside
+  # the cluster is an -8 deduction and a genuine way to lose the data (§5.3).
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: civicpulse
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  # One replica deliberately. Postgres replication is a real design decision (streaming
+  # replication, failover, split-brain) and faking it with replicas: 2 over separate volumes gives
+  # two divergent databases behind one Service.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        # The postgres image's own uid/gid. fsGroup makes the mounted volume group-writable by it,
+        # without which initdb fails on a fresh PVC.
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: civicpulse-config, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: civicpulse-config, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: civicpulse-secrets, key: POSTGRES_PASSWORD }
+            - name: PGDATA
+              # A subdirectory of the mount, not the mount root: initdb refuses to run in a
+              # directory containing lost+found, which many volume drivers create.
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            # Requests are mandatory, and not only for the HPA: the scheduler uses them to decide
+            # whether this pod fits on a node at all.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            # pg_isready with -U and -d: without them it checks the wrong user and reports ready
+            # while the application database is still initialising.
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            # Deliberately more forgiving than readiness: a slow query should remove this pod from
+            # service, not restart the database underneath open transactions.
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    # This is the line that makes it a StatefulSet rather than a Deployment with a volume: each
+    # pod gets its own PVC, bound for the pod's lifetime, and deleting the pod does NOT delete the
+    # claim. That is what makes "delete the postgres pod, keep every row" true.
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

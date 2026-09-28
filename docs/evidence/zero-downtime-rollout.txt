@@ -1,0 +1,44 @@
+Zero-downtime rollout under live load
+date: 2026-09-28T19:02:25Z
+commit: b0cefbb
+======================================================================
+
+Rollout strategy:
+{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"}
+terminationGracePeriodSeconds: 45
+preStop: ["sleep","10"]
+
+Pods before:
+  backend-7dfb969cfd-b2vgh  Running  age=17m
+  backend-7dfb969cfd-ztjlc  Running  age=12m
+
+==> triggering the rolling update
+deployment.apps/backend restarted
+Waiting for deployment "backend" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "backend" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "backend" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "backend" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "backend" rollout to finish: 1 old replicas are pending termination...
+deployment "backend" successfully rolled out
+
+==> holding 10s after rollout completes
+
+Pods after:
+  backend-6487dc575-fpzw7  Running  age=16s
+  backend-6487dc575-xkl6k  Running  age=13s
+  backend-7dfb969cfd-ztjlc  Terminating  age=12m
+
+======================================================================
+requests during the rollout : 1489
+HTTP 200                    : 1489
+failures (non-200 or error) : 0
+
+RESULT: ZERO failed requests across a full rolling update.
+
+Why this works:
+  maxUnavailable: 0  — capacity is added before any is removed.
+  preStop sleep 10   — the pod leaves the Service endpoints BEFORE it stops accepting
+                       connections. Endpoint removal and SIGTERM are concurrent, not
+                       ordered, so without this sleep the pod would still receive new
+                       connections while already draining, and those would be refused.
+  graceful shutdown  — uvicorn finishes in-flight requests (app/main.py lifespan).

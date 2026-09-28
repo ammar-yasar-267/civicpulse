@@ -1,0 +1,19 @@
+# PodDisruptionBudget on the backend (§3.3).
+#
+# Guards against VOLUNTARY disruption only — a node drain, a cluster upgrade, a `kubectl drain`.
+# It tells the eviction API "never leave fewer than one backend pod running", so draining a node
+# that hosts both replicas evicts them one at a time instead of together.
+#
+# It does not protect against a crash or a node failure; nothing can. That is what replicas are for.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend-pdb
+  namespace: civicpulse
+spec:
+  # minAvailable: 1 rather than maxUnavailable: 1 — as the HPA scales up, minAvailable keeps its
+  # meaning ("at least one alive") while maxUnavailable would permit evicting proportionally more.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: backend

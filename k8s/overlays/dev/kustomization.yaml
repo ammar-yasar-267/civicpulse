@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: civicpulse
+
+resources:
+  - ../../base
+
+# Locally built images, loaded straight into the kind cluster with `kind load docker-image`, so
+# there is no registry in the loop while developing.
+images:
+  - name: civicpulse-backend
+    newTag: dev
+  - name: civicpulse-frontend
+    newTag: dev
+
+replicas:
+  # Two backend replicas even in dev: it is the minimum that demonstrates a zero-downtime rollout,
+  # and a single replica would hide the whole class of bug this setup exists to catch.
+  - name: backend
+    count: 2
+  - name: frontend
+    count: 1
+
+patches:
+  # Keyword triage in dev: no API key needed, no network calls, no free-tier quota consumed while
+  # iterating. Switch to llm by editing this value and re-applying.
+  - target:
+      kind: ConfigMap
+      name: civicpulse-config
+    patch: |-
+      - op: replace
+        path: /data/TRIAGE_PROVIDER
+        value: "rules"
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "DEBUG"

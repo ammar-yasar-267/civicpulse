@@ -1,0 +1,60 @@
+CivicPulse stack verification
+date: 2026-09-28T19:27:57Z
+commit: 7fa4696
+base URL: http://localhost:8080  (all app traffic goes through the frontend proxy)
+======================================================================
+
+-- 1. health and readiness (probe semantics, rubric C) ---------------
+  PASS  GET /health via backend port                               200
+  PASS  /ready reports postgres ok                                 contains "postgres":"ok"
+  PASS  /ready reports redis ok                                    contains "redis":"ok"
+
+-- 2. network segmentation (rubric G, 4 marks) -----------------------
+  PASS  frontend -> database is blocked                            frontend cannot resolve/reach database
+  PASS  frontend -> backend permitted                              frontend -> backend works
+  PASS  internal network has no egress                             no egress from internal
+
+-- 3. submit -> triage -> persist (rubric C, F) ----------------------
+  PASS  triage assigned a category                                 contains "category":"water"
+  PASS  triage assigned high priority                              contains "priority":"high"
+  PASS  AI summary present                                         contains "ai_summary":"
+  PASS  provider recorded                                          contains "triaged_by":"
+  PASS  GET the complaint back                                     200
+        triaged_by: llm:groq
+        latency_ms: 0
+
+-- 4. state machine (rubric C, 3 marks) -----------------------------
+  PASS  open -> resolved is refused                                409
+  PASS  409 names the attempted transition                         contains open -> resolved
+  PASS  open -> in_progress is allowed                             200
+  PASS  in_progress -> resolved is allowed                         200
+  PASS  terminal status explains itself                            contains terminal status
+
+-- 5. validation (rubric C) ------------------------------------------
+  PASS  short input is 400 not 422                                 400
+  PASS  error body names the text field                            contains "field":"text"
+  PASS  error body names the location field                        contains "field":"location"
+
+-- 6. stats cache: MISS then HIT (rubric E) --------------------------
+  PASS  second read is a cache HIT                                 HIT
+  PASS  a write invalidates the cache                              MISS
+
+-- 7. distributed rate limiter (rubric E, 4 marks) ------------------
+  PASS  limiter returns 429 within limit+3 requests                yes
+  PASS  429 carries Retry-After                                    Retry-After: 60
+
+-- 8. observability surface (rubric F) ------------------------------
+  PASS  active provider reported                                   contains "active_provider"
+  PASS  triage cache hit rate reported                             contains "cache_hit_rate"
+  PASS  recent outcomes recorded                                   contains "recent_outcomes"
+  PASS  metrics: request count                                     contains civicpulse_http_requests_total
+  PASS  metrics: request latency                                   contains civicpulse_http_request_duration_seconds
+  PASS  metrics: triage latency                                    contains civicpulse_triage_duration_seconds
+  PASS  metrics: fallback counter                                  contains civicpulse_triage_fallbacks_total
+
+-- 9. structured logging (rubric C) --------------------------------
+  PASS  X-Request-ID appears in logs                               request_id propagated into JSON logs
+
+======================================================================
+PASS: 31   FAIL: 0
+transcript written to docs/evidence/stack-verification.txt

@@ -1,0 +1,17 @@
+# node_modules is the big one: ~200 MB that npm ci reproduces from package-lock.json inside the
+# builder anyway. Sending it would also risk shipping host-built native modules (§3.1).
+node_modules/
+dist/
+coverage/
+.vite/
+
+.env
+.env.*
+
+# Tests run in CI, not in the image build.
+tests/
+.eslintrc.cjs
+
+.DS_Store
+.idea/
+.vscode/

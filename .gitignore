@@ -8,6 +8,7 @@ secrets/
 
 # --- python ---
 __pycache__/
+*.egg-info/
 *.py[cod]
 .venv/
 venv/
@@ -29,6 +30,9 @@ coverage/
 .DS_Store
 .idea/
 *.swp
+
+# --- the assignment brief itself: course material, not our deliverable ---
+Software Construction and Design*.pdf
 
 # --- local k8s / load-test artefacts ---
 kubeconfig

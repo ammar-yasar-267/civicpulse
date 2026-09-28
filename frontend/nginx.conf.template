@@ -1,0 +1,90 @@
+# nginx config for the frontend image.
+#
+# Rendered by docker-entrypoint.sh with envsubst at container start, so ${BACKEND_URL} is a
+# runtime value. This is the other half of build-once-deploy-many: the image contains no
+# environment-specific hostname, and pointing it at a different backend is an env var rather
+# than a rebuild (see docs/adr/0002-frontend-runtime-config.md).
+
+# Resolver, supplied by the base image's 15-local-resolvers.envsh from /etc/resolv.conf. Needed
+# because the /api/ block below resolves its upstream at request time rather than at startup —
+# see the comment there.
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+
+# Preserve a caller-supplied X-Request-ID, and mint one only when absent. Unconditionally
+# setting $request_id here would overwrite the client's id at the proxy, breaking the trace
+# exactly where it is most useful — the citizen quotes a reference, and it matches nothing in
+# the backend's logs.
+map $http_x_request_id $civicpulse_request_id {
+    default $http_x_request_id;
+    ""      $request_id;
+}
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Nothing here should be cached by an intermediary long enough to outlive a deploy.
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+
+    # The runtime config file, written at container start. Must never be cached, or a browser
+    # would keep pointing at yesterday's backend after a redeploy.
+    location = /config.js {
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        expires -1;
+        try_files /config.js =404;
+    }
+
+    # Proxy the API so the browser only ever talks to this origin. Consequences worth stating:
+    # the frontend needs no absolute backend URL, and CORS never applies to the real deployment.
+    location /api/ {
+        # The upstream goes through a variable deliberately. With a literal hostname, nginx
+        # resolves it once at startup and refuses to boot if it does not resolve yet — so a
+        # frontend pod scheduled before the backend Service has endpoints would crash-loop, and
+        # a backend rescheduled to a new IP would keep receiving traffic at the old one. Via a
+        # variable, nginx resolves per request using the resolver above.
+        #
+        # $request_uri is appended explicitly because variable form disables nginx's implicit
+        # URI pass-through.
+        set $upstream "${BACKEND_URL}";
+        proxy_pass $upstream$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Preserves the real client IP so the backend's Redis rate limiter keys on the citizen
+        # rather than on this nginx pod (see app/providers/ratelimit.py).
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID $civicpulse_request_id;
+
+        # Triage calls a language model and is capped at 10s server-side; allow for that plus
+        # a retry rather than cutting the citizen off at nginx's 60s default.
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    # This image's own liveness endpoint. Deliberately separate from the backend's /health:
+    # nginx being up says nothing about the API, and conflating them would make a frontend
+    # probe fail for a backend problem.
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    # Hashed assets are immutable, so they can be cached hard.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # SPA fallback. index.html itself is never cached, so a deploy is picked up on reload.
+    location / {
+        add_header Cache-Control "no-cache" always;
+        try_files $uri $uri/ /index.html;
+    }
+}

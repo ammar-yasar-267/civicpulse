@@ -1,0 +1,300 @@
+# Continuous delivery. Runs on push to main, i.e. on merged, reviewed code.
+#
+# The gating is the point (§3.4): test -> build-push -> deploy-k8s, each with needs:. Without it
+# you publish artifacts from code you already know is broken, and the registry stops being a
+# record of what passed.
+#
+# Images are tagged with the commit SHA and deployed by that SHA. :latest is pushed as a
+# convenience pointer but never deployed — so "what is production running?" has a one-word answer
+# you can paste into `git show`.
+
+name: cd
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read      # widened per-job only where needed
+
+concurrency:
+  # Never two deploys at once, and do NOT cancel one in flight: interrupting a rollout leaves the
+  # cluster half-updated, which is worse than finishing and then superseding it.
+  group: cd-main
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  test:
+    name: full suite on the merged result
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: civicpulse
+          POSTGRES_PASSWORD: civicpulse
+          POSTGRES_DB: civicpulse_test
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U civicpulse -d civicpulse_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TRIAGE_PROVIDER: simulated
+      TEST_POSTGRES_HOST: localhost
+      TEST_POSTGRES_PORT: "55432"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Backend suite
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest==8.3.4 pytest-cov==6.0.0 pytest-asyncio==0.25.0 ruff==0.8.4 mypy==1.14.0 types-redis==4.6.0.20241004
+          ruff check app tests
+          mypy app
+          pytest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend suite
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm run test
+
+      - name: Submission lint
+        run: python3 scripts/check_submission.py --ci
+
+  # ---------------------------------------------------------------------------
+  build-push:
+    name: build and push to GHCR
+    runs-on: ubuntu-24.04
+    needs: [test]              # nothing is published from code that has not passed
+    permissions:
+      contents: read
+      packages: write          # the narrowest grant that can push to GHCR
+      id-token: write          # for keyless cosign signing below
+    outputs:
+      backend-digest: ${{ steps.backend.outputs.digest }}
+      frontend-digest: ${{ steps.frontend.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # A scoped, automatically-rotated token, never an account password.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase the image namespace
+        # GHCR rejects uppercase; github.repository_owner may contain capitals.
+        id: ns
+        run: echo "ns=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push backend
+        id: backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/civicpulse-backend:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/civicpulse-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Build and push frontend
+        id: frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/civicpulse-frontend:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/civicpulse-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Generate SBOMs with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/civicpulse-backend:${{ github.sha }}
+          format: spdx-json
+          artifact-name: sbom-backend.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign images with cosign (keyless)
+        # Signs the DIGEST, not the tag: a tag can be moved to different bytes, a digest cannot.
+        # Keyless via the OIDC token, so there is no signing key to store or leak.
+        run: |
+          cosign sign --yes \
+            "${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/civicpulse-backend@${{ steps.backend.outputs.digest }}"
+          cosign sign --yes \
+            "${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}/civicpulse-frontend@${{ steps.frontend.outputs.digest }}"
+
+      - name: Record what was published
+        run: |
+          {
+            echo "### Published images"
+            echo ""
+            echo "| image | tag | digest |"
+            echo "|---|---|---|"
+            echo "| civicpulse-backend | \`${{ github.sha }}\` | \`${{ steps.backend.outputs.digest }}\` |"
+            echo "| civicpulse-frontend | \`${{ github.sha }}\` | \`${{ steps.frontend.outputs.digest }}\` |"
+            echo ""
+            echo "Deployed by digest. \`:latest\` is pushed as a pointer but never deployed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  deploy-k8s:
+    name: deploy to an ephemeral cluster
+    runs-on: ubuntu-24.04
+    needs: [build-push]        # deploy only what was actually published
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: civicpulse
+          # Pinned node image: the cluster's Kubernetes version is part of what we test against.
+          node_image: kindest/node:v1.31.2
+          wait: 120s
+
+      - name: Lowercase the image namespace
+        id: ns
+        run: echo "ns=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Install the ingress controller
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
+          kubectl wait --namespace ingress-nginx \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=180s
+
+      - name: Install metrics-server
+        # Without it the HPA reports <unknown>/60% forever, so the autoscaler cannot be
+        # demonstrated at all.
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
+          # kind's kubelet serving certs are self-signed; metrics-server must be told to accept them.
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+
+      - name: Create the namespace and secrets
+        # Secrets are created from GitHub Secrets at deploy time. The committed manifests carry
+        # placeholders only — a real key in a manifest is -15, base64 or not.
+        run: |
+          kubectl create namespace civicpulse --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n civicpulse create secret generic civicpulse-secrets \
+            --from-literal=POSTGRES_PASSWORD='${{ secrets.POSTGRES_PASSWORD }}' \
+            --from-literal=GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Pin the overlay to this commit's images
+        working-directory: k8s/overlays/prod
+        run: |
+          # Deploy by immutable reference. This is the line that makes build-once-deploy-many
+          # real: the same bytes that passed CI are the bytes that run.
+          kubectl kustomize . > /dev/null   # fail fast if the overlay is broken
+          cd "$GITHUB_WORKSPACE/k8s/overlays/prod"
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("kustomization.yaml")
+          s = p.read_text()
+          s = s.replace("PLACEHOLDER_REGISTRY", "${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}")
+          s = s.replace("PLACEHOLDER_TAG", "${{ github.sha }}")
+          p.write_text(s)
+          print(s)
+          PY
+
+      - name: Apply the prod overlay
+        run: kubectl apply -k k8s/overlays/prod
+
+      - name: Wait for rollouts
+        run: |
+          kubectl -n civicpulse rollout status statefulset/postgres --timeout=240s
+          kubectl -n civicpulse rollout status deployment/redis --timeout=180s
+          kubectl -n civicpulse rollout status deployment/backend --timeout=240s
+          kubectl -n civicpulse rollout status deployment/frontend --timeout=180s
+
+      - name: Run migrations and seed
+        run: |
+          kubectl -n civicpulse exec deploy/backend -- alembic upgrade head
+          kubectl -n civicpulse exec deploy/backend -- python -m app.seed
+
+      - name: Smoke test through the Ingress
+        run: |
+          # Reach the ingress controller from the runner via a port-forward, which avoids
+          # depending on how kind maps host ports.
+          kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80 &
+          sleep 6
+          echo "--- frontend:"
+          curl -fsS -H 'Host: civicpulse.local' http://localhost:8080/ -o /dev/null -w '  HTTP %{http_code}\n'
+          echo "--- API through the ingress:"
+          curl -fsS -H 'Host: civicpulse.local' http://localhost:8080/api/stats -o /dev/null -w '  HTTP %{http_code}\n'
+          echo "--- submit a complaint:"
+          curl -fsS -H 'Host: civicpulse.local' -H 'Content-Type: application/json' \
+            -X POST http://localhost:8080/api/complaints \
+            -d '{"text":"Burst water main flooding Street 12 since fajr, water entering homes.","location":"Street 12, Lahore"}' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"  created {d['id']} category={d['category']} triaged_by={d['triaged_by']}\")"
+
+      - name: Show the HPA
+        run: |
+          kubectl -n civicpulse get hpa -o wide
+          kubectl -n civicpulse describe hpa backend-hpa | tail -20
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "### Deployed to the ephemeral cluster"
+            echo ""
+            echo "Commit: \`${{ github.sha }}\`"
+            echo ""
+            echo '```'
+            kubectl -n civicpulse get deploy,statefulset,svc,hpa,pdb 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n civicpulse get pods -o wide
+          kubectl -n civicpulse describe pods
+          kubectl -n civicpulse logs -l app=backend --tail 100 --all-containers || true
+          kubectl -n civicpulse get events --sort-by=.lastTimestamp | tail -40

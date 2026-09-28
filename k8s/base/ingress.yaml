@@ -1,0 +1,38 @@
+# One host, two paths: / to the frontend, /api to the backend (§3.3).
+#
+# /api is routed at the Ingress rather than relying solely on the frontend's nginx proxy, so the API
+# is reachable without a round trip through the SPA container. Both paths work; the frontend proxy
+# is what the browser actually uses, and this is what CI smoke-tests.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: civicpulse
+  namespace: civicpulse
+  annotations:
+    # Triage calls a language model and is capped at 10s server-side. The default 60s proxy timeout
+    # would be fine, but being explicit documents the intent and survives a controller default change.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-body-size: "64k"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: civicpulse.local
+      http:
+        paths:
+          # Most specific path first. With pathType: Prefix the controller sorts by specificity, but
+          # ordering them this way makes the intent obvious to a human reading the manifest.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 8080

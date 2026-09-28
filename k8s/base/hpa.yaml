@@ -1,0 +1,54 @@
+# HorizontalPodAutoscaler on the backend (§3.3).
+#
+# Prerequisite that catches people every semester: this only works because
+# k8s/base/backend.yaml sets resources.requests.cpu. The HPA computes utilisation as
+# usage / request, so with no request there is no denominator and the HPA reports
+# <unknown>/60% forever. metrics-server must also be installed — the HPA reads the
+# metrics.k8s.io API, which nothing serves by default.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: civicpulse
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # 60% leaves headroom for the lag between load arriving and capacity arriving: new pods
+          # need to be scheduled, pull an image, start uvicorn and pass a readiness probe. Target
+          # 90% and the existing pods saturate long before the replacements are serving.
+          averageUtilization: 60
+  behavior:
+    scaleUp:
+      # No stabilisation window: users are waiting, so react to the first data point that justifies
+      # more capacity.
+      stabilizationWindowSeconds: 0
+      policies:
+        # Whichever is larger — doubling is fast when at 2 replicas, the flat +4 matters once the
+        # percentage of a small number is too timid.
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Five minutes of sustained low utilisation before shrinking. Scaling down is not urgent, and
+      # flapping is expensive: every removed pod that is needed again 30 seconds later costs another
+      # cold start, and during that window the remaining pods absorb the load.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+      selectPolicy: Min

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CivicPulse</title>
+    <!--
+      Runtime configuration, written by docker-entrypoint.sh when the container starts.
+      Loaded before the bundle so window.__CIVICPULSE_CONFIG__ exists by the time the app
+      reads it. Deliberately not bundled: that is the whole point (see src/api/config.ts).
+      It 404s harmlessly under the Vite dev server, where the app falls back to same-origin.
+    -->
+    <script src="/config.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

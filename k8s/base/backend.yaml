@@ -1,0 +1,153 @@
+# Backend Deployment, Service, and the probe configuration that makes rollouts safe.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: civicpulse
+  labels:
+    app: backend
+spec:
+  type: ClusterIP       # reached by the Ingress and by the frontend, never from outside directly
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: civicpulse
+  labels:
+    app: backend
+spec:
+  replicas: 2           # the HPA's minReplicas; two is the floor for a zero-downtime rollout
+  revisionHistoryLimit: 5   # enough history for `kubectl rollout undo`, not unbounded clutter
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 is what makes the rollout zero-downtime: capacity is added before any is
+      # taken away. maxSurge: 1 keeps the extra cost to one pod at a time.
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        # Prometheus scrape hints; harmless without Prometheus installed.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Must exceed the preStop sleep plus uvicorn's graceful shutdown window, or the kubelet
+      # SIGKILLs the process mid-drain and the rolling update drops live requests anyway.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsUser: 10001        # matches the civicpulse user created in backend/Dockerfile
+        runAsGroup: 10001
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          # Overridden per-overlay by kustomize `images:`. Tagged here so `kustomize build` on the
+          # base alone still produces valid, pullable manifests.
+          image: civicpulse-backend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: civicpulse-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: civicpulse-secrets, key: POSTGRES_PASSWORD }
+            - name: GROQ_API_KEY
+              valueFrom:
+                # From a Secret, never from a ConfigMap and never from a file in the repo
+                # (§2.5 rule 6). Marked optional so the rules/ollama providers run without one.
+                secretKeyRef:
+                  name: civicpulse-secrets
+                  key: GROQ_API_KEY
+                  optional: true
+          resources:
+            # requests are MANDATORY for the HPA: it computes utilisation as usage / request, so
+            # with no request there is no denominator and the HPA sits at <unknown>/60% forever.
+            # These values are the guess made when the manifest was written; the VPA's
+            # recommendation and what changed after adopting it are recorded in
+            # docs/ENGINEERING-NOTES.md.
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              # No CPU limit on purpose. A CPU limit throttles the container at the cgroup level,
+              # which adds tail latency and depresses the very utilisation signal the HPA scales
+              # on — the pod looks busy but measures idle. Memory IS limited, because memory is
+              # not compressible and an unbounded leak takes the node down.
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem needs a writable /tmp for anything that spools to disk.
+            - name: tmp
+              mountPath: /tmp
+
+          # --- the three probes, and why each is wired the way it is (§3.3) ---
+
+          startupProbe:
+            # Buys up to 60s (30 x 2s) for a slow start without letting the liveness probe fire.
+            # This is what stops a restart loop on boot: a cold start that takes 20s is not a
+            # failure, but without a startupProbe the livenessProbe would call it one.
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+            timeoutSeconds: 3
+
+          livenessProbe:
+            # /health, which by design performs NO I/O. A liveness probe that touched Postgres
+            # would restart every backend pod simultaneously during a slow query — turning a
+            # degraded database into a cluster-wide outage.
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          readinessProbe:
+            # /ready, which DOES check Postgres and Redis. Failing removes the pod from the
+            # Service endpoints without killing it, so it stops receiving traffic and recovers on
+            # its own the moment the dependency does.
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+            successThreshold: 1
+
+          lifecycle:
+            preStop:
+              # Endpoint removal and SIGTERM are concurrent, not ordered: without this sleep the
+              # process starts draining while the Service is still sending it new connections, and
+              # those get refused. Sleeping here lets the endpoint removal propagate to kube-proxy
+              # and the Ingress first; uvicorn then drains in-flight work (app/main.py lifespan).
+              exec:
+                command: ["sleep", "10"]
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,26 @@
+# Keep the build context small and secrets out of it. The context is uploaded to the daemon in
+# full, so anything here is both a speed cost and a leak risk (§3.1).
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets: must never enter an image layer, where `docker history` would expose them.
+.env
+.env.*
+
+# Tests and fixtures are not needed to run the service; CI runs them from the checkout.
+tests/
+
+# Local tooling noise
+.DS_Store
+.idea/
+.vscode/
+

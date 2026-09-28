@@ -1,0 +1,113 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: civicpulse
+  labels:
+    app: frontend
+spec:
+  type: ClusterIP     # the Ingress is the only way in; no NodePort needed or wanted
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: civicpulse
+  labels:
+    app: frontend
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 101          # the nginx user in the base image
+        runAsGroup: 101
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: civicpulse-frontend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Runtime configuration, the whole point of the /config.js mechanism: the SAME image
+            # that ran in dev runs here, pointed at a different backend by an env var rather than
+            # a rebuild (docs/adr/0002-frontend-runtime-config.md).
+            - name: BACKEND_URL
+              # The backend Service's cluster DNS name. Not localhost — that would mean this same
+              # pod, and is an -8 deduction (§5.3).
+              value: "http://backend.civicpulse.svc.cluster.local:8000"
+            - name: API_BASE_URL
+              # Empty: the browser talks only to this origin and nginx proxies /api onward, so no
+              # absolute backend URL ever reaches the bundle and CORS never applies.
+              value: ""
+            - name: APP_ENVIRONMENT
+              value: "kubernetes"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NOT read-only: the entrypoint writes /config.js and the rendered nginx.conf at start,
+            # and nginx needs its cache and pid paths. The writable paths are narrowed to emptyDir
+            # mounts below rather than granting the whole filesystem.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            # nginx's own liveness only. Deliberately NOT the backend's /health: a backend outage
+            # must not restart every frontend pod, which would remove the one component still able
+            # to serve a useful error page.
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
