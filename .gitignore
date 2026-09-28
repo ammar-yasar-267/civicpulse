@@ -1,0 +1,36 @@
+# --- secrets: never commit these (assignment §5.3 = -20 marks) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- node ---
+node_modules/
+dist/
+.vite/
+coverage/
+*.local
+
+# --- os / editor ---
+.DS_Store
+.idea/
+*.swp
+
+# --- local k8s / load-test artefacts ---
+kubeconfig
+*.tgz
+load/results/*.json
