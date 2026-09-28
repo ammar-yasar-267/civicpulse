@@ -10,6 +10,15 @@
 # see the comment there.
 resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
 
+# Preserve a caller-supplied X-Request-ID, and mint one only when absent. Unconditionally
+# setting $request_id here would overwrite the client's id at the proxy, breaking the trace
+# exactly where it is most useful — the citizen quotes a reference, and it matches nothing in
+# the backend's logs.
+map $http_x_request_id $civicpulse_request_id {
+    default $http_x_request_id;
+    ""      $request_id;
+}
+
 server {
     listen 8080;
     server_name _;
@@ -49,7 +58,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Request-ID $civicpulse_request_id;
 
         # Triage calls a language model and is capped at 10s server-side; allow for that plus
         # a retry rather than cutting the citizen off at nginx's 60s default.
