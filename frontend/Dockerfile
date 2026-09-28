@@ -25,11 +25,23 @@ COPY src ./src
 RUN npm run build
 
 # ---------- stage 2: serve ----------
-FROM nginx:1.27.3-alpine-slim@sha256:5a56ae385906c5b43ccc99379bce883aa93dc0556d7f705ba501d819925e8fa1 AS runtime
+FROM nginx:1.29.3-alpine-slim@sha256:4c175d0d849aae0e0eedc64d718ef6323bed2bc68ee673e2d0a1bd5d501d0e5f AS runtime
 
-# No package installs at all: alpine-slim already ships envsubst and the entrypoint hooks in
-# /docker-entrypoint.d/ that render /etc/nginx/templates/*.template at container start. Using
-# the base image's own mechanism rather than replacing it keeps this stage to 21 MB.
+# alpine-slim already ships envsubst and the entrypoint hooks in /docker-entrypoint.d/ that render
+# /etc/nginx/templates/*.template at container start, so nothing is INSTALLED here — using the base
+# image's own mechanism rather than replacing it keeps this stage to ~21 MB.
+#
+# What IS done is applying Alpine's available security patches. The published nginx base lags the
+# distribution's own package repository, so it ships known-fixable HIGH findings (zlib
+# CVE-2026-22184, musl CVE-2026-40200, openssl CVE-2026-45447) that CI's Trivy gate fails on.
+#
+# This upgrades the whole package set rather than a named list, which was the first attempt: patching
+# named packages turned into whack-a-mole, because upgrading one surfaces the next. The trade-off is
+# explicit — the base image digest pins where the build STARTS, while this line means the final layer
+# reflects Alpine's repository at build time rather than being byte-identical forever. Reproducibility
+# of the starting point is kept; reproducibility of the patch level is traded for actually being
+# patched, which is the right way round for an internet-facing container.
+RUN apk upgrade --no-cache
 
 # Only the built artefact crosses the stage boundary — no source, no node_modules, no Node.
 COPY --from=build /app/dist /usr/share/nginx/html

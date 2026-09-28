@@ -229,25 +229,38 @@ jobs:
       - name: Load images
         run: docker load -i /tmp/images.tar
 
-      - name: Scan backend image
-        uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          image-ref: civicpulse-backend:ci
-          severity: HIGH,CRITICAL
-          # Only fail on something we can actually act on: a vulnerability with no released fix
-          # cannot be remediated by us today, and failing on it trains people to ignore the scan.
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
+      - name: Install Trivy (pinned)
+        # The trivy-action wrapper resolves its own Trivy version at run time and fails when that
+        # lookup does not succeed — a scan that breaks for reasons unrelated to the code is a scan
+        # people learn to ignore. Installing a pinned binary makes the tool version part of the
+        # repository, and it is the same version used locally.
+        env:
+          TRIVY_VERSION: "0.74.0"
+        run: |
+          curl -sSfL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo install /tmp/trivy /usr/local/bin/trivy
+          trivy --version
 
-      - name: Scan frontend image
-        uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          image-ref: civicpulse-frontend:ci
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
+      - name: Scan both images
+        # --ignore-unfixed: fail only on something actionable. A vulnerability with no released fix
+        # cannot be remediated by us today, and failing the build on it teaches people to bypass
+        # the gate rather than to fix anything.
+        run: |
+          status=0
+          for image in civicpulse-backend:ci civicpulse-frontend:ci; do
+            echo "::group::trivy $image"
+            trivy image \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --format table \
+              --no-progress \
+              "$image" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
 
   # ---------------------------------------------------------------------------
   manifests:
