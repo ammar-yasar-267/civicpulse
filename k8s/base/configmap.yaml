@@ -1,0 +1,31 @@
+# Non-secret configuration only. Anything that would be damaging to read goes in secret.yaml,
+# because a ConfigMap is readable by anyone with get access to the namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: civicpulse-config
+  namespace: civicpulse
+data:
+  # Service DNS names, not localhost: each of these resolves through the cluster's DNS to a
+  # ClusterIP Service. Using localhost here would mean "the same pod", which is wrong and is an
+  # -8 deduction (§5.3).
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "civicpulse"
+  POSTGRES_USER: "civicpulse"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+
+  # Triage. The overlays override this: dev runs the keyword rules so no key is needed, prod runs
+  # the hosted model.
+  TRIAGE_PROVIDER: "rules"
+  GROQ_BASE_URL: "https://api.groq.com/openai/v1"
+  GROQ_MODEL: "openai/gpt-oss-20b"
+  TRIAGE_TIMEOUT_SECONDS: "10"
+  TRIAGE_CACHE_TTL_SECONDS: "86400"
+  STATS_CACHE_TTL_SECONDS: "30"
+
+  RATE_LIMIT_REQUESTS: "60"
+  RATE_LIMIT_WINDOW_SECONDS: "60"
+  LOG_LEVEL: "INFO"
+  CORS_ORIGINS: ""

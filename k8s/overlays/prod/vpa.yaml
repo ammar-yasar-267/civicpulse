@@ -1,0 +1,47 @@
+# VerticalPodAutoscaler on the backend, in RECOMMENDER MODE ONLY (§3.3).
+#
+# updateMode: "Off" is the entire point, and the reason is a feedback loop:
+#
+#   HPA scales on CPU utilisation, which is usage / request.
+#   VPA in Auto mode adjusts the request.
+#
+#   So: VPA raises the request -> computed utilisation falls -> HPA scales IN -> the remaining pods
+#   each carry more load -> observed usage per pod rises -> VPA raises the request again. Two
+#   controllers acting on opposite sides of the same fraction, each making the other's input wrong.
+#   The replica count and the request size oscillate, and neither converges.
+#
+# Recommender mode plus a human deciding is current industrial practice for exactly this reason.
+# The loop this enables is in docs/ENGINEERING-NOTES.md: record the guessed requests, run the load
+# test, read `kubectl describe vpa backend-vpa`, adopt the recommendation, re-run, report what
+# changed about HPA behaviour.
+#
+# Requires the VPA CRDs (autoscaling.k8s.io/v1) to be installed:
+#   scripts/k8s-up.sh installs them; without them this object is simply not created, which is why
+#   it lives in the base but is tolerated as absent by kubeconform's CRD schema lookup.
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: backend-vpa
+  namespace: civicpulse
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  updatePolicy:
+    # "Off" = recommend only, never evict. "Auto" here would fight the HPA as described above, and
+    # would also restart pods to resize them, which the PDB can slow but not prevent.
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: backend
+        controlledResources: ["cpu", "memory"]
+        # Bounds keep the recommendation sane on a student laptop cluster: without a maximum, a
+        # burst can produce a recommendation no node can satisfy, and the pod becomes unschedulable
+        # the moment somebody adopts it.
+        minAllowed:
+          cpu: 50m
+          memory: 128Mi
+        maxAllowed:
+          cpu: "1"
+          memory: 1Gi

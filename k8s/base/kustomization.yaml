@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The base is a complete, working deployment on its own. Overlays change only what genuinely
+# differs between environments — image references, replica counts, the triage provider — rather
+# than re-declaring objects.
+namespace: civicpulse
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - postgres.yaml
+  - redis.yaml
+  - backend.yaml
+  - frontend.yaml
+  - ingress.yaml
+  - hpa.yaml
+  - pdb.yaml
+  # The VPA is deliberately absent: it needs the VerticalPodAutoscaler CRD, and including it here
+  # would make `kubectl apply -k` fail on any cluster without the VPA installed. It lives in
+  # overlays/prod/vpa.yaml instead.
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: civicpulse

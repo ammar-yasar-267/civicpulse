@@ -1,0 +1,113 @@
+# Redis: a Deployment plus a PVC, unlike Postgres.
+#
+# The asymmetry is deliberate and is a viva question waiting to happen. Redis here is a cache and a
+# rate-limiter counter store: at replicas: 1 with AOF on a volume, losing the pod costs a cold cache
+# and a reset rate-limit window, not citizens' complaints. Postgres holds the only irreplaceable
+# state, so it gets the stronger identity guarantees. Both have volumes; only one needs stable
+# per-pod identity.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: civicpulse
+  labels:
+    app: redis
+spec:
+  type: ClusterIP     # never NodePort/LoadBalancer: an open Redis with no auth gets mined
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: civicpulse
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: civicpulse
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: the PVC is ReadWriteOnce, so a surge pod could not mount it and
+    # the rollout would deadlock waiting for a volume it can never attach.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        runAsUser: 999          # the redis user in the official image
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: redis
+          image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+          args:
+            # AOF on, RDB off. AOF replays a command log, so the rate-limiter counters and cached
+            # triage results survive a restart; everysec bounds the worst-case loss to one second
+            # without paying fsync on every write.
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
+            - --save
+            - ""
+            # Bounded memory with LRU eviction. Unbounded, Redis grows until the container limit
+            # OOM-kills it — which would take the rate limiter down along with the cache.
+            - --maxmemory
+            - 200mb
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # Deliberately above --maxmemory (200mb) so Redis evicts by policy before the kernel
+              # kills it. A limit at or below maxmemory converts a graceful eviction into an OOM.
+              cpu: 500m
+              memory: 320Mi
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-data

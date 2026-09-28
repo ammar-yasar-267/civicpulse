@@ -1,0 +1,9 @@
+# Everything lives in this namespace, never default (§3.3). A namespace gives you one place to
+# apply quotas, one place to delete the whole environment, and a blast radius you can describe.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: civicpulse
+  labels:
+    app.kubernetes.io/name: civicpulse
+    app.kubernetes.io/part-of: civicpulse

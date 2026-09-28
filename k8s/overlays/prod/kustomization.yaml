@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: civicpulse
+
+resources:
+  - ../../base
+  # Only prod runs the VPA, because only prod has load worth taking a recommendation from. It
+  # lives here rather than in the base so that `kubectl apply -k overlays/dev` works on a cluster
+  # with no VPA CRDs installed.
+  - vpa.yaml
+
+# Deploy by immutable reference. PLACEHOLDER_TAG is replaced with the commit SHA by cd.yml, so what
+# runs is traceable to exactly one commit: "what is production running?" has an answer you can paste
+# into `git show`. Never :latest — that is an -8 deduction and makes rollback guesswork.
+images:
+  - name: civicpulse-backend
+    newName: PLACEHOLDER_REGISTRY/civicpulse-backend
+    newTag: PLACEHOLDER_TAG
+  - name: civicpulse-frontend
+    newName: PLACEHOLDER_REGISTRY/civicpulse-frontend
+    newTag: PLACEHOLDER_TAG
+
+replicas:
+  - name: backend
+    count: 2      # the floor; the HPA owns the count from here upward
+  - name: frontend
+    count: 2
+
+patches:
+  - target:
+      kind: ConfigMap
+      name: civicpulse-config
+    patch: |-
+      - op: replace
+        path: /data/TRIAGE_PROVIDER
+        value: "llm"
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "INFO"
