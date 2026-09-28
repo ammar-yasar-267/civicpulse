@@ -123,19 +123,37 @@ check "a write invalidates the cache" "MISS" "$AFTER_WRITE"
 
 echo
 echo "-- 7. distributed rate limiter (rubric E, 4 marks) ------------------"
-LIMIT_HIT="no"
-for i in $(seq 1 15); do
-    c=$(code -X POST "$BASE/api/complaints" -H 'Content-Type: application/json' \
-        -d "{\"text\":\"Street light $i is fused in our lane, please replace it soon.\",\"location\":\"Johar Town, Lahore\"}")
-    [ "$c" = "429" ] && LIMIT_HIT="yes" && break
-done
-check "limiter returns 429 under a burst" "yes" "$LIMIT_HIT"
-RETRY=$(curl -s -D- -o /dev/null -X POST "$BASE/api/complaints" -H 'Content-Type: application/json' \
-    -d '{"text":"one more complaint to confirm the Retry-After header is present","location":"Lahore"}' | tr -d '\r' | awk -F': ' '/^[Rr]etry-[Aa]fter/{print $2}')
-if [ -n "$RETRY" ]; then
-    printf '  PASS  %-58s Retry-After: %s\n' "429 carries Retry-After" "$RETRY"; pass=$((pass + 1))
+# Discover the configured limit from the response header rather than assuming one. The limit is an
+# environment variable and differs between dev and CI, so a hardcoded burst size makes this check
+# pass or fail for reasons that have nothing to do with the limiter working.
+CONFIGURED_LIMIT=$(curl -s -D- -o /dev/null -X POST "$BASE/api/complaints" -H 'Content-Type: application/json' \
+    -d '{"text":"probe request used only to read the configured rate limit header","location":"Lahore"}' \
+    | tr -d '\r' | awk -F': ' '/^[Xx]-[Rr]ate[Ll]imit-[Ll]imit/{print $2}')
+CONFIGURED_LIMIT=${CONFIGURED_LIMIT:-10}
+BURST=$((CONFIGURED_LIMIT + 3))
+
+if [ "$BURST" -gt 80 ]; then
+    # A deliberately high limit (a load-test profile, say) would need hundreds of requests to trip.
+    # Say so rather than silently passing or spending a minute on it.
+    printf '  SKIP  %-58s limit is %s/window — too high to burst here\n' \
+        "limiter returns 429 under a burst" "$CONFIGURED_LIMIT"
 else
-    printf '  FAIL  %-58s no Retry-After header\n' "429 carries Retry-After"; fail=$((fail + 1))
+    LIMIT_HIT="no"
+    for i in $(seq 1 "$BURST"); do
+        c=$(code -X POST "$BASE/api/complaints" -H 'Content-Type: application/json' \
+            -d "{\"text\":\"Street light $i is fused in our lane, please replace it soon.\",\"location\":\"Johar Town, Lahore\"}")
+        [ "$c" = "429" ] && LIMIT_HIT="yes" && break
+    done
+    check "limiter returns 429 within limit+3 requests" "yes" "$LIMIT_HIT"
+fi
+if [ "$BURST" -le 80 ]; then
+    RETRY=$(curl -s -D- -o /dev/null -X POST "$BASE/api/complaints" -H 'Content-Type: application/json' \
+        -d '{"text":"one more complaint to confirm the Retry-After header is present","location":"Lahore"}' | tr -d '\r' | awk -F': ' '/^[Rr]etry-[Aa]fter/{print $2}')
+    if [ -n "$RETRY" ]; then
+        printf '  PASS  %-58s Retry-After: %s\n' "429 carries Retry-After" "$RETRY"; pass=$((pass + 1))
+    else
+        printf '  FAIL  %-58s no Retry-After header\n' "429 carries Retry-After"; fail=$((fail + 1))
+    fi
 fi
 
 echo

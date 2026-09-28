@@ -301,7 +301,9 @@ jobs:
           POSTGRES_PASSWORD=$(openssl rand -hex 16)
           POSTGRES_DB=civicpulse
           TRIAGE_PROVIDER=simulated
-          RATE_LIMIT_REQUESTS=1000
+          # Low enough that the integration run actually exercises the limiter. The rate-limit
+          # checks in verify-stack.sh read this back from the X-RateLimit-Limit header.
+          RATE_LIMIT_REQUESTS=25
           RATE_LIMIT_WINDOW_SECONDS=60
           LOG_LEVEL=INFO
           EOF

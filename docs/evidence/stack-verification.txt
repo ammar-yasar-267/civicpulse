@@ -1,6 +1,6 @@
 CivicPulse stack verification
-date: 2026-09-28T18:08:13Z
-commit: 5bbf92e
+date: 2026-09-28T19:10:22Z
+commit: eae4613
 base URL: http://localhost:8080  (all app traffic goes through the frontend proxy)
 ======================================================================
 
@@ -40,8 +40,8 @@ base URL: http://localhost:8080  (all app traffic goes through the frontend prox
   PASS  a write invalidates the cache                              MISS
 
 -- 7. distributed rate limiter (rubric E, 4 marks) ------------------
-  PASS  limiter returns 429 under a burst                          yes
-  PASS  429 carries Retry-After                                    Retry-After: 60
+  PASS  limiter returns 429 within limit+3 requests                yes
+  PASS  429 carries Retry-After                                    Retry-After: 58
 
 -- 8. observability surface (rubric F) ------------------------------
   PASS  active provider reported                                   contains "active_provider"
