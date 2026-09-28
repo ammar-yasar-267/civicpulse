@@ -1,0 +1,244 @@
+# CivicPulse — development stack.
+#
+#   cp .env.example .env && docker compose up -d --build
+#
+# Five cooperating containers on two networks. The segmentation is the point (§3.2): the
+# frontend is the internet-facing component and therefore the most likely to be compromised, so
+# it has no route to the database at all. Demonstrable:
+#
+#   docker compose exec frontend ping -c1 database    # must FAIL
+#
+# This file is the DEV file: it builds from source and bind-mounts the backend for hot reload.
+# compose.prod.yaml is the deploy file and does neither.
+
+name: civicpulse
+
+services:
+  # ---------------------------------------------------------------- frontend --
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: civicpulse-frontend:dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Same-origin: the browser talks only to nginx, which proxies /api onward. No absolute
+      # backend URL ever reaches the bundle (see docs/adr/0002-frontend-runtime-config.md).
+      API_BASE_URL: ""
+      BACKEND_URL: "http://backend:8000"
+      APP_ENVIRONMENT: "development"
+    networks:
+      # edge ONLY. Joining `internal` here would defeat the whole exercise.
+      - edge
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 128M }
+        reservations: { cpus: "0.05", memory: 32M }
+
+  # ----------------------------------------------------------------- backend --
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: civicpulse-backend:dev
+    restart: unless-stopped
+    ports:
+      # Published in dev only, so you can curl the API and read /docs directly. The prod file
+      # does not publish it — traffic goes through the frontend proxy.
+      - "8000:8000"
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      REDIS_HOST: cache
+      REDIS_PORT: "6379"
+      TRIAGE_PROVIDER: ${TRIAGE_PROVIDER:-rules}
+      # Never inlined here: the key comes from .env, which is gitignored (§2.5 rule 6).
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:1b}
+      TRIAGE_TIMEOUT_SECONDS: ${TRIAGE_TIMEOUT_SECONDS:-10}
+      TRIAGE_CACHE_TTL_SECONDS: ${TRIAGE_CACHE_TTL_SECONDS:-86400}
+      STATS_CACHE_TTL_SECONDS: ${STATS_CACHE_TTL_SECONDS:-30}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-10}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
+    networks:
+      # The ONLY service on both networks. It is the bridge, and that is a deliberate,
+      # single, reviewable place where edge traffic can reach data.
+      - edge
+      - internal
+    volumes:
+      # Dev-only bind mount for hot reload. Correct here because the feedback loop matters more
+      # than immutability while you are writing code; wrong in compose.prod.yaml, where the
+      # image must be the only source of what runs — a bind mount there means the thing you
+      # tested is not the thing you deployed.
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    healthcheck:
+      # /health, not /ready: this asks "is the process alive", and a database blip must not
+      # make Compose mark the backend unhealthy and restart it.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 512M }
+        reservations: { cpus: "0.10", memory: 128M }
+
+  # ---------------------------------------------------------------- database --
+  database:
+    # Pinned by tag AND digest: an untagged postgres is an -8 deduction, and the digest is what
+    # actually freezes the bytes (§5.3).
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      # Subdirectory rather than the volume root: initdb refuses to run in a directory that
+      # already contains lost+found on some volume drivers.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    networks:
+      # internal ONLY, and `internal` has no route off the host. Note there is no `ports:`
+      # key here even in dev: use `docker compose exec database psql` instead of exposing 5432.
+      - internal
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -U and -d are required: without them pg_isready checks the wrong user and reports
+      # healthy while the application database is still initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 512M }
+        reservations: { cpus: "0.10", memory: 128M }
+
+  # ------------------------------------------------------------------- cache --
+  cache:
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    restart: unless-stopped
+    # AOF on, so the rate-limiter counters and cached triage results survive a restart. Why a
+    # cache needs a volume at all is answered in docs/ENGINEERING-NOTES.md.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+    networks:
+      - internal
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.05", memory: 32M }
+
+  # ------------------------------------------------------------------ ollama --
+  # The offline triage path. Optional by default, because it pulls ~1.3 GB of weights:
+  #   docker compose --profile ollama up -d
+  # then set TRIAGE_PROVIDER=ollama in .env and restart the backend.
+  ollama:
+    image: ollama/ollama:0.5.4
+    profiles: ["ollama"]
+    restart: unless-stopped
+    networks:
+      # On `internal`, which has no internet route — fine, because the model is pulled once by
+      # the init container below and then never needs the network again. This is exactly the
+      # trade-off §3.2 asks about, and the reason a hosted LLM cannot live here.
+      - internal
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "2.00", memory: 4G }
+        reservations: { cpus: "0.25", memory: 1G }
+
+  # Pulls the model once into the named volume, then exits. Split out so the weights are not
+  # re-downloaded on every `up`, and so `ollama` itself needs no egress.
+  ollama-pull:
+    image: ollama/ollama:0.5.4
+    profiles: ["ollama"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    networks:
+      # Needs egress to reach the model registry, so it sits on `edge` rather than `internal`.
+      - edge
+      - internal
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'ollama pull "${OLLAMA_MODEL:-llama3.2:1b}" && echo "model ready"'
+    restart: "no"
+
+networks:
+  # frontend <-> backend, and the only network with a route to the outside world. The backend
+  # needs it to reach Groq.
+  edge:
+    driver: bridge
+
+  # backend <-> database <-> cache. internal: true removes the gateway, so nothing on this
+  # network can reach the internet and nothing on the internet can reach it.
+  internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  # The durable one. Losing this loses citizens' complaints, which is the only truly
+  # irreplaceable state in the system.
+  pgdata:
+
+  # Justified in docs/ENGINEERING-NOTES.md: a cache can be rebuilt, but the rate-limiter
+  # counters cannot be, and a limiter that forgets on restart is a limiter an attacker resets.
+  redisdata:
+
+  # Model weights, so `up` does not re-pull ~1.3 GB every time.
+  ollama_models:
