@@ -19,7 +19,6 @@ from pythonjsonlogger.json import JsonFormatter
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 
-
 class RequestIdFilter(logging.Filter):
     """Stamps the ambient request_id onto every record, including records emitted by
     libraries that know nothing about our middleware."""
