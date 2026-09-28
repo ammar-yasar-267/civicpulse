@@ -1,0 +1,66 @@
+CivicPulse — Kubernetes deployment evidence
+date: 2026-09-28T18:48:14Z
+commit: 1a5d19e
+cluster: kind, v1.31.2
+
+=== objects ===
+NAME                            READY   STATUS    RESTARTS   AGE
+pod/backend-7dfb969cfd-b2vgh    1/1     Running   0          2m55s
+pod/backend-7dfb969cfd-dfzgv    1/1     Running   0          2m55s
+pod/frontend-675d6d69c6-w5fsv   1/1     Running   0          2m55s
+pod/postgres-0                  1/1     Running   0          16s
+pod/redis-6dcbc99c99-6k4cq      1/1     Running   0          2m55s
+
+NAME               TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)    AGE
+service/backend    ClusterIP   10.96.50.120   <none>        8000/TCP   2m55s
+service/frontend   ClusterIP   10.96.85.64    <none>        8080/TCP   2m55s
+service/postgres   ClusterIP   None           <none>        5432/TCP   2m55s
+service/redis      ClusterIP   10.96.248.16   <none>        6379/TCP   2m55s
+
+NAME                       READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/backend    2/2     2            2           2m55s
+deployment.apps/frontend   1/1     1            1           2m55s
+deployment.apps/redis      1/1     1            1           2m55s
+
+NAME                                  DESIRED   CURRENT   READY   AGE
+replicaset.apps/backend-7dfb969cfd    2         2         2       2m56s
+replicaset.apps/frontend-675d6d69c6   1         1         1       2m56s
+replicaset.apps/redis-6dcbc99c99      1         1         1       2m56s
+
+NAME                        READY   AGE
+statefulset.apps/postgres   1/1     2m56s
+
+NAME                                              REFERENCE            TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/backend-hpa   Deployment/backend   cpu: 7%/60%   2         10        2          2m56s
+
+=== PVCs (the reason data survives a pod delete) ===
+NAME                STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+pgdata-postgres-0   Bound    pvc-07c4a909-5711-4785-b433-d4df2b41968d   2Gi        RWO            standard       <unset>                 2m56s
+redis-data          Bound    pvc-cc23b98a-e704-4e84-95f7-de67717f4022   1Gi        RWO            standard       <unset>                 2m56s
+
+=== HPA with live metrics ===
+NAME          REFERENCE            TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+backend-hpa   Deployment/backend   cpu: 7%/60%   2         10        2          2m56s
+
+=== PDB ===
+NAME          MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+backend-pdb   1               N/A               1                     2m56s
+
+=== Ingress routing / and /api on one host ===
+NAME         CLASS   HOSTS              ADDRESS     PORTS   AGE
+civicpulse   nginx   civicpulse.local   localhost   80      2m56s
+
+=== probes on the backend container ===
+startupProbe:  /health
+livenessProbe: /health
+readinessProbe:/ready
+requests:      {"cpu":"100m","memory":"192Mi"}
+limits:        {"memory":"512Mi"}
+
+=== rollout strategy (zero-downtime) ===
+{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"}
+
+=== persistence proof ===
+rows before deleting postgres-0: 37
+rows after  deleting postgres-0: 37
+PASS — the PVC outlived the pod

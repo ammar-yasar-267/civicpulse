@@ -58,10 +58,10 @@ kubectl config use-context "kind-${CLUSTER}" >/dev/null
 # ------------------------------------------------------------ ingress ctl --
 say "installing the ingress controller"
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
-kubectl wait --namespace ingress-nginx \
-    --for=condition=ready pod \
-    --selector=app.kubernetes.io/component=controller \
-    --timeout=180s
+# rollout status, not `wait --for=condition=ready pod`: the latter fails with "no matching
+# resources found" when it runs before the ReplicaSet has created the pod, which is a race you
+# lose roughly half the time on a fresh cluster.
+kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=240s
 
 # --------------------------------------------------------- metrics-server --
 say "installing metrics-server (the HPA cannot work without it)"
