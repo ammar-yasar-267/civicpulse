@@ -1,0 +1,161 @@
+# CivicPulse — production/deploy stack.
+#
+#   IMAGE_TAG=<commit-sha> docker compose -f compose.prod.yaml up -d
+#
+# Differences from compose.yaml, all deliberate (§3.2):
+#
+#   * No `build:` key anywhere. This file DEPLOYS images; it does not make them. If it could
+#     build, "what is running in production?" would have no answer you could paste into
+#     `git show` — which is the whole point of build-once-deploy-many.
+#   * Images are referenced by ${IMAGE_TAG}, which is a commit SHA or a digest. Never :latest —
+#     deploying a moving tag is an -8 deduction and, more to the point, makes rollback guesswork.
+#   * No bind mounts. The image is the only source of what runs; a mounted host directory means
+#     the thing you tested is not the thing you deployed.
+#   * No published port on the database or the cache. Only the frontend is reachable.
+#
+# IMAGE_TAG has no default on purpose: `docker compose -f compose.prod.yaml up` with an unset
+# tag fails loudly instead of silently deploying something arbitrary.
+
+name: civicpulse-prod
+
+services:
+  frontend:
+    image: ${REGISTRY:?set REGISTRY}/civicpulse-frontend:${IMAGE_TAG:?set IMAGE_TAG to a commit SHA or digest, never latest}
+    restart: unless-stopped
+    ports:
+      # The only ingress into the whole stack.
+      - "${FRONTEND_PORT:-8080}:8080"
+    environment:
+      API_BASE_URL: ""
+      BACKEND_URL: "http://backend:8000"
+      APP_ENVIRONMENT: "production"
+    networks:
+      - edge
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 128M }
+        reservations: { cpus: "0.05", memory: 32M }
+
+  backend:
+    image: ${REGISTRY:?set REGISTRY}/civicpulse-backend:${IMAGE_TAG:?set IMAGE_TAG to a commit SHA or digest, never latest}
+    restart: unless-stopped
+    # No `ports:`. The API is reached through the frontend's /api proxy, so the only way in is
+    # the one path that is actually tested.
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      REDIS_HOST: cache
+      REDIS_PORT: "6379"
+      TRIAGE_PROVIDER: ${TRIAGE_PROVIDER:-rules}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+      TRIAGE_TIMEOUT_SECONDS: ${TRIAGE_TIMEOUT_SECONDS:-10}
+      TRIAGE_CACHE_TTL_SECONDS: ${TRIAGE_CACHE_TTL_SECONDS:-86400}
+      STATS_CACHE_TTL_SECONDS: ${STATS_CACHE_TTL_SECONDS:-30}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-10}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    networks:
+      - edge
+      - internal
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 512M }
+        reservations: { cpus: "0.25", memory: 192M }
+
+  database:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    restart: unless-stopped
+    # No `ports:` — a published 5432 in a production file is an -8 deduction, and rightly so.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    networks:
+      - internal
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "2.00", memory: 1G }
+        reservations: { cpus: "0.25", memory: 256M }
+
+  cache:
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    restart: unless-stopped
+    # No `ports:` either. An exposed Redis with no auth is how clusters get mined.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+      # Bounded memory with an LRU policy: unbounded, Redis would grow until the container's
+      # memory limit killed it, taking the rate limiter down with the cache.
+      - --maxmemory
+      - 200mb
+      - --maxmemory-policy
+      - allkeys-lru
+    networks:
+      - internal
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.05", memory: 64M }
+
+networks:
+  edge:
+    driver: bridge
+  internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
