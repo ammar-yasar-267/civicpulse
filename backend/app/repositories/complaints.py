@@ -54,7 +54,10 @@ class ComplaintRepository:
     def update_status(self, complaint: Complaint, status: Status) -> Complaint:
         complaint.status = status
         complaint.updated_at = datetime.now(UTC)
-        self._session.flush()
+        # Commit here, not only in the get_session teardown: that teardown can run after the
+        # response is sent, so a client's next request could still read the old status (a flaky
+        # open -> in_progress -> resolved sequence in the smoke test).
+        self._session.commit()
         return complaint
 
     # --- reads -----------------------------------------------------------------
