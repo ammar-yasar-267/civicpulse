@@ -197,13 +197,32 @@ jobs:
         id: ns
         run: echo "ns=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
+      - name: Log in to GHCR
+        # Needed to pull the images published by build-push: the packages from a private repository
+        # are private too. Read-only here — this job publishes nothing.
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install the ingress controller
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
-          kubectl wait --namespace ingress-nginx \
-            --for=condition=ready pod \
-            --selector=app.kubernetes.io/component=controller \
-            --timeout=180s
+
+          # `rollout status`, not `wait --for=condition=ready pod`. The latter fails with
+          # "no matching resources found" if it runs before the ReplicaSet has created the pod, and
+          # its timeout does not account for the image pull — on a fresh runner the controller image
+          # is always a cold pull. This is the same fix already applied in scripts/k8s-up.sh; it was
+          # missed here, and this job is where it actually bit.
+          kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=420s
+
+      - name: Diagnose the ingress controller if it did not start
+        if: failure()
+        run: |
+          kubectl -n ingress-nginx get pods -o wide
+          kubectl -n ingress-nginx describe pods -l app.kubernetes.io/component=controller | tail -40
+          kubectl -n ingress-nginx get events --sort-by=.lastTimestamp | tail -20
 
       - name: Install metrics-server
         # Without it the HPA reports <unknown>/60% forever, so the autoscaler cannot be
@@ -213,7 +232,7 @@ jobs:
           # kind's kubelet serving certs are self-signed; metrics-server must be told to accept them.
           kubectl -n kube-system patch deployment metrics-server --type=json \
             -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
-          kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
 
       - name: Create the namespace and secrets
         # Secrets are created from GitHub Secrets at deploy time. The committed manifests carry
@@ -241,6 +260,24 @@ jobs:
           p.write_text(s)
           print(s)
           PY
+
+      - name: Load this commit's images into the cluster
+        # The packages published by a private repository are private, so the kind node has no
+        # credentials for them and every pod would sit in ImagePullBackOff. Pulling them on the
+        # runner (which IS authenticated) and side-loading into the node avoids putting registry
+        # credentials inside the cluster at all.
+        #
+        # Still deploy-by-digest in spirit: these are the exact SHA-tagged images build-push
+        # produced, and the manifests reference them by that tag. imagePullPolicy is IfNotPresent,
+        # so the loaded copy is what runs.
+        env:
+          IMAGE_BASE: ${{ env.REGISTRY }}/${{ steps.ns.outputs.ns }}
+        run: |
+          docker pull "$IMAGE_BASE/civicpulse-backend:${{ github.sha }}"
+          docker pull "$IMAGE_BASE/civicpulse-frontend:${{ github.sha }}"
+          kind load docker-image --name civicpulse \
+            "$IMAGE_BASE/civicpulse-backend:${{ github.sha }}" \
+            "$IMAGE_BASE/civicpulse-frontend:${{ github.sha }}"
 
       - name: Apply the prod overlay
         run: kubectl apply -k k8s/overlays/prod
