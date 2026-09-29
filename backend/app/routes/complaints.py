@@ -6,6 +6,7 @@ InvalidTransition into a 409 whose body names the attempted transition.
 """
 
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -91,11 +92,20 @@ def list_complaints(
     category: Category | None = None,
     priority: Priority | None = None,
     status_filter: Annotated[Status | None, Query(alias="status")] = None,
+    created_after: Annotated[
+        datetime | None,
+        Query(description="Return complaints created at or after this ISO-8601 timestamp."),
+    ] = None,
+    created_before: Annotated[
+        datetime | None,
+        Query(description="Return complaints created at or before this ISO-8601 timestamp."),
+    ] = None,
 ) -> Page:
-    """Filter by category, priority and status; paginate; return the total.
+    """Filter by category, priority, status, and creation date range; paginate; return the total.
 
     page_size is capped at 100 by the Query constraint, so a caller cannot ask for the whole
     table and turn pagination into a denial of service.
+    created_after and created_before accept any ISO-8601 datetime string and are inclusive.
     """
     page_size = min(page_size, settings.max_page_size)
     items, total = service.list_page(
@@ -104,6 +114,8 @@ def list_complaints(
         category=category,
         priority=priority,
         status=status_filter,
+        created_after=created_after,
+        created_before=created_before,
     )
     return Page(
         items=[ComplaintOut.model_validate(c) for c in items],

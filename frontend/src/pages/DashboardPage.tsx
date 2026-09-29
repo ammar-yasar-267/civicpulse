@@ -15,9 +15,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { ApiError, api, type Complaint, type ListParams, type Page, type Status } from '../api/client';
 import { CategoryBadge, PriorityBadge, StatusBadge } from '../components/Badges';
 import { ProviderBadge } from '../components/ProviderBadge';
+import { CATEGORIES, PRIORITIES, STATUSES, labelOf } from '../constants';
 
 const PAGE_SIZE = 10;
-const ALL_STATUSES: Status[] = ['open', 'in_progress', 'resolved', 'rejected'];
 
 export function DashboardPage() {
   const [page, setPage] = useState(1);
@@ -93,13 +93,14 @@ export function DashboardPage() {
         <label>
           Category
           <select
+            aria-label="Filter by category"
             value={filters.category ?? ''}
             onChange={(e) => updateFilter('category', e.target.value)}
           >
             <option value="">All</option>
-            {['water', 'electricity', 'sanitation', 'roads', 'streetlights', 'other'].map((c) => (
+            {CATEGORIES.map((c) => (
               <option key={c} value={c}>
-                {c}
+                {labelOf(c)}
               </option>
             ))}
           </select>
@@ -107,13 +108,14 @@ export function DashboardPage() {
         <label>
           Priority
           <select
+            aria-label="Filter by priority"
             value={filters.priority ?? ''}
             onChange={(e) => updateFilter('priority', e.target.value)}
           >
             <option value="">All</option>
-            {['high', 'normal', 'low'].map((p) => (
+            {PRIORITIES.map((p) => (
               <option key={p} value={p}>
-                {p}
+                {labelOf(p)}
               </option>
             ))}
           </select>
@@ -121,13 +123,14 @@ export function DashboardPage() {
         <label>
           Status
           <select
+            aria-label="Filter by status"
             value={filters.status ?? ''}
             onChange={(e) => updateFilter('status', e.target.value)}
           >
             <option value="">All</option>
-            {ALL_STATUSES.map((s) => (
+            {STATUSES.map((s) => (
               <option key={s} value={s}>
-                {s}
+                {labelOf(s)}
               </option>
             ))}
           </select>
@@ -197,9 +200,9 @@ export function DashboardPage() {
                       {updating === c.id ? 'Updating…' : 'Change to…'}
                     </option>
                     {/* Every status is offered; the server decides which are legal. */}
-                    {ALL_STATUSES.filter((s) => s !== c.status).map((s) => (
+                    {STATUSES.filter((s) => s !== c.status).map((s) => (
                       <option key={s} value={s}>
-                        {s.replace('_', ' ')}
+                        {labelOf(s)}
                       </option>
                     ))}
                   </select>

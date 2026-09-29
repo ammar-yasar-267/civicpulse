@@ -122,15 +122,24 @@ export function SubmitPage() {
             placeholder="Burst water main flooding Street 12 since fajr, water entering ground floors"
           />
           <div className="field-foot">
-            {errors.text ? (
+            {errors.text && (
               <span id="text-error" role="alert" className="error">
                 {errors.text}
               </span>
-            ) : (
-              <span id="text-hint" className="muted">
-                {text.trim().length}/{TEXT_MAX} characters
-              </span>
             )}
+            <span
+              id="text-hint"
+              className={
+                text.trim().length > TEXT_MAX
+                  ? 'char-count char-count-over'
+                  : text.trim().length > TEXT_MAX * 0.9
+                    ? 'char-count char-count-warn'
+                    : 'char-count'
+              }
+              aria-live="polite"
+            >
+              {text.trim().length} / {TEXT_MAX}
+            </span>
           </div>
         </div>
 
