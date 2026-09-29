@@ -193,6 +193,14 @@ jobs:
           node_image: kindest/node:v1.31.2
           wait: 120s
 
+      - name: Label the control-plane node for ingress scheduling
+        # The ingress-nginx kind deployment sets NodeSelector: ingress-ready=true on the
+        # controller pod. Without this label the pod sits Pending forever — the scheduler
+        # reports "0/1 nodes available: node(s) didn't match Pod's node affinity/selector".
+        # kind does not add this label automatically; it is usually set via a kind config file,
+        # but labelling the node post-creation achieves the same result without adding a file.
+        run: kubectl label node civicpulse-control-plane ingress-ready=true
+
       - name: Lowercase the image namespace
         id: ns
         run: echo "ns=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
