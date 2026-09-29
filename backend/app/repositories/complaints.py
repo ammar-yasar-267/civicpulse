@@ -6,7 +6,7 @@ is a database at all — which is why swapping the store would touch one directo
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -70,6 +70,8 @@ class ComplaintRepository:
         category: Category | None,
         priority: Priority | None,
         status: Status | None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> Select:
         stmt = select(Complaint)
         if category is not None:
@@ -78,6 +80,15 @@ class ComplaintRepository:
             stmt = stmt.where(Complaint.priority == priority)
         if status is not None:
             stmt = stmt.where(Complaint.status == status)
+        if created_after is not None:
+            # Normalise naive datetimes to UTC so comparisons are always tz-aware.
+            if created_after.tzinfo is None:
+                created_after = created_after.replace(tzinfo=timezone.utc)
+            stmt = stmt.where(Complaint.created_at >= created_after)
+        if created_before is not None:
+            if created_before.tzinfo is None:
+                created_before = created_before.replace(tzinfo=timezone.utc)
+            stmt = stmt.where(Complaint.created_at <= created_before)
         return stmt
 
     def list_page(
@@ -88,6 +99,8 @@ class ComplaintRepository:
         category: Category | None = None,
         priority: Priority | None = None,
         status: Status | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> tuple[list[Complaint], int]:
         """One page plus the unpaginated total, which the contract requires so the UI can
         render a real pager.
@@ -97,9 +110,9 @@ class ComplaintRepository:
         order can differ between pages and silently drop or duplicate a row.
 
         Query served by ix_complaints_status_priority (filter) and
-        ix_complaints_created_at (sort) — see docs/ENGINEERING-NOTES.md.
+        ix_complaints_created_at (sort and date-range filter) — see docs/ENGINEERING-NOTES.md.
         """
-        base = self._filtered(category, priority, status)
+        base = self._filtered(category, priority, status, created_after, created_before)
 
         total = self._session.scalar(select(func.count()).select_from(base.subquery()))
 

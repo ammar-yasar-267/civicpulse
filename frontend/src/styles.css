@@ -162,6 +162,23 @@ textarea[aria-invalid='true'] {
   font-size: 13px;
 }
 
+/* Character counter below the complaint textarea */
+.char-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.char-count-warn {
+  color: var(--normal); /* amber — approaching limit */
+}
+
+.char-count-over {
+  color: var(--high); /* red — over limit */
+  font-weight: 600;
+}
+
 button {
   font: inherit;
   padding: 9px 14px;

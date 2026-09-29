@@ -7,6 +7,7 @@ what keeps the rules reusable by the seed script and any future CLI.
 
 import logging
 import uuid
+from datetime import datetime
 
 from app.domain.enums import Category, Priority, Status
 from app.domain.state_machine import assert_transition
@@ -91,6 +92,8 @@ class ComplaintService:
         category: Category | None = None,
         priority: Priority | None = None,
         status: Status | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> tuple[list[Complaint], int]:
         return self._repo.list_page(
             page=page,
@@ -98,6 +101,8 @@ class ComplaintService:
             category=category,
             priority=priority,
             status=status,
+            created_after=created_after,
+            created_before=created_before,
         )
 
     def change_status(
