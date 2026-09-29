@@ -8,10 +8,11 @@ Both are integration tests using real Postgres and a fake Redis, matching the st
 existing test suite (see conftest.py for fixture details).
 """
 
+import datetime
+
 from fastapi.testclient import TestClient
 
 from tests.conftest import unique_payload, valid_payload
-
 
 # ---------------------------------------------------------------------------
 # Stats endpoint
@@ -92,18 +93,14 @@ def test_stats_by_category_counts_are_accurate(unlimited_client: TestClient) -> 
 
 def test_created_after_excludes_earlier_complaints(unlimited_client: TestClient) -> None:
     """created_after should exclude complaints submitted before the given timestamp."""
-    import datetime
-
     unlimited_client.post("/api/complaints", json=unique_payload())
 
     # Capture a timestamp after the first complaint is stored.
-    cutoff = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    cutoff = datetime.datetime.now(datetime.UTC).isoformat()
 
     unlimited_client.post("/api/complaints", json=unique_payload())
 
-    response = unlimited_client.get(
-        "/api/complaints", params={"created_after": cutoff}
-    )
+    response = unlimited_client.get("/api/complaints", params={"created_after": cutoff})
     assert response.status_code == 200
     body = response.json()
     # Only the complaint submitted after the cutoff should be returned.
@@ -112,17 +109,13 @@ def test_created_after_excludes_earlier_complaints(unlimited_client: TestClient)
 
 def test_created_before_excludes_later_complaints(unlimited_client: TestClient) -> None:
     """created_before should exclude complaints submitted after the given timestamp."""
-    import datetime
+    unlimited_client.post("/api/complaints", json=unique_payload())
+
+    cutoff = datetime.datetime.now(datetime.UTC).isoformat()
 
     unlimited_client.post("/api/complaints", json=unique_payload())
 
-    cutoff = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-    unlimited_client.post("/api/complaints", json=unique_payload())
-
-    response = unlimited_client.get(
-        "/api/complaints", params={"created_before": cutoff}
-    )
+    response = unlimited_client.get("/api/complaints", params={"created_before": cutoff})
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 1
@@ -130,11 +123,9 @@ def test_created_before_excludes_later_complaints(unlimited_client: TestClient) 
 
 def test_date_range_combined_with_category_filter(unlimited_client: TestClient) -> None:
     """created_after can be combined with category to narrow results further."""
-    import datetime
-
     unlimited_client.post("/api/complaints", json=unique_payload())  # sanitation/normal
 
-    cutoff = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    cutoff = datetime.datetime.now(datetime.UTC).isoformat()
 
     unlimited_client.post(
         "/api/complaints",

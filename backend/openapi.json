@@ -467,7 +467,7 @@
   "paths": {
     "/api/complaints": {
       "get": {
-        "description": "Filter by category, priority and status; paginate; return the total.\n\npage_size is capped at 100 by the Query constraint, so a caller cannot ask for the whole\ntable and turn pagination into a denial of service.",
+        "description": "Filter by category, priority, status, and creation date range; paginate; return the total.\n\npage_size is capped at 100 by the Query constraint, so a caller cannot ask for the whole\ntable and turn pagination into a denial of service.\ncreated_after and created_before accept any ISO-8601 datetime string and are inclusive.",
         "operationId": "list_complaints_api_complaints_get",
         "parameters": [
           {
@@ -539,6 +539,44 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "description": "Return complaints created at or after this ISO-8601 timestamp.",
+            "in": "query",
+            "name": "created_after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Return complaints created at or after this ISO-8601 timestamp.",
+              "title": "Created After"
+            }
+          },
+          {
+            "description": "Return complaints created at or before this ISO-8601 timestamp.",
+            "in": "query",
+            "name": "created_before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Return complaints created at or before this ISO-8601 timestamp.",
+              "title": "Created Before"
             }
           }
         ],

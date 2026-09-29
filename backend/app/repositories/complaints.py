@@ -6,7 +6,7 @@ is a database at all — which is why swapping the store would touch one directo
 """
 
 import uuid
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -83,11 +83,11 @@ class ComplaintRepository:
         if created_after is not None:
             # Normalise naive datetimes to UTC so comparisons are always tz-aware.
             if created_after.tzinfo is None:
-                created_after = created_after.replace(tzinfo=timezone.utc)
+                created_after = created_after.replace(tzinfo=UTC)
             stmt = stmt.where(Complaint.created_at >= created_after)
         if created_before is not None:
             if created_before.tzinfo is None:
-                created_before = created_before.replace(tzinfo=timezone.utc)
+                created_before = created_before.replace(tzinfo=UTC)
             stmt = stmt.where(Complaint.created_at <= created_before)
         return stmt
 

@@ -214,16 +214,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Pre-load ingress-nginx images into the cluster
+        # The controller image (~300 MB) is the most common cause of rollout timeouts on cold
+        # runners. Pull it on the Docker daemon (which has no timeout constraint) and side-load it
+        # into the kind node so that containerd never hits the registry during the rollout wait.
+        # The kube-webhook-certgen image is pulled by the pre-install and post-install Jobs and
+        # must be loaded for the same reason.
+        run: |
+          docker pull registry.k8s.io/ingress-nginx/controller:v1.11.3
+          docker pull registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.4.4
+          kind load docker-image --name civicpulse \
+            registry.k8s.io/ingress-nginx/controller:v1.11.3 \
+            registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.4.4
+
       - name: Install the ingress controller
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
 
-          # `rollout status`, not `wait --for=condition=ready pod`. The latter fails with
-          # "no matching resources found" if it runs before the ReplicaSet has created the pod, and
-          # its timeout does not account for the image pull — on a fresh runner the controller image
-          # is always a cold pull. This is the same fix already applied in scripts/k8s-up.sh; it was
-          # missed here, and this job is where it actually bit.
-          kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=420s
+          # Images are already in the kind node (loaded above), so the rollout should complete
+          # quickly. 180 s is generous for a local image — if it exceeds this something else is wrong.
+          kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=180s
 
       - name: Diagnose the ingress controller if it did not start
         if: failure()

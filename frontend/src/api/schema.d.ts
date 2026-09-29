@@ -13,10 +13,11 @@ export interface paths {
         };
         /**
          * List Complaints
-         * @description Filter by category, priority and status; paginate; return the total.
+         * @description Filter by category, priority, status, and creation date range; paginate; return the total.
          *
          *     page_size is capped at 100 by the Query constraint, so a caller cannot ask for the whole
          *     table and turn pagination into a denial of service.
+         *     created_after and created_before accept any ISO-8601 datetime string and are inclusive.
          */
         get: operations["list_complaints_api_complaints_get"];
         put?: never;
@@ -361,6 +362,10 @@ export interface operations {
                 category?: components["schemas"]["Category"] | null;
                 priority?: components["schemas"]["Priority"] | null;
                 status?: components["schemas"]["Status"] | null;
+                /** @description Return complaints created at or after this ISO-8601 timestamp. */
+                created_after?: string | null;
+                /** @description Return complaints created at or before this ISO-8601 timestamp. */
+                created_before?: string | null;
             };
             header?: never;
             path?: never;
