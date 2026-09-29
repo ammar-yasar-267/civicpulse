@@ -100,9 +100,7 @@ def test_created_after_excludes_earlier_complaints(unlimited_client: TestClient)
 
     unlimited_client.post("/api/complaints", json=unique_payload())
 
-    response = unlimited_client.get(
-        "/api/complaints", params={"created_after": cutoff}
-    )
+    response = unlimited_client.get("/api/complaints", params={"created_after": cutoff})
     assert response.status_code == 200
     body = response.json()
     # Only the complaint submitted after the cutoff should be returned.
@@ -117,9 +115,7 @@ def test_created_before_excludes_later_complaints(unlimited_client: TestClient) 
 
     unlimited_client.post("/api/complaints", json=unique_payload())
 
-    response = unlimited_client.get(
-        "/api/complaints", params={"created_before": cutoff}
-    )
+    response = unlimited_client.get("/api/complaints", params={"created_before": cutoff})
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 1
