@@ -252,6 +252,14 @@ jobs:
             -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
           kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
 
+      - name: Install the VPA CRDs
+        # The prod overlay contains a VerticalPodAutoscaler, and `kubectl apply -k` fails with
+        # "no matches for kind VerticalPodAutoscaler" on a cluster without the CRDs. The VPA runs
+        # in updateMode "Off" here, so only the CRDs are needed — not the recommender/updater.
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/autoscaler/vertical-pod-autoscaler-1.2.1/vertical-pod-autoscaler/deploy/vpa-v1-crd-gen.yaml
+          kubectl wait --for=condition=Established crd/verticalpodautoscalers.autoscaling.k8s.io --timeout=60s
+
       - name: Create the namespace and secrets
         # Secrets are created from GitHub Secrets at deploy time. The committed manifests carry
         # placeholders only — a real key in a manifest is -15, base64 or not.
